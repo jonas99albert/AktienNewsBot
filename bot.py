@@ -10,6 +10,7 @@ import os
 import sqlite3
 from dotenv import load_dotenv
 load_dotenv()
+import anthropic
 import asyncio
 import feedparser
 import yfinance as yf
@@ -38,6 +39,9 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+# Anthropic Client
+anthropic_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
 
 # ─── Datenbank ───────────────────────────────────────────────────────────────
 DB_PATH = "stocks.db"
@@ -88,21 +92,47 @@ def get_stock_info(ticker: str) -> dict | None:
     try:
         stock = yf.Ticker(ticker)
 
-        # Kursdaten über history (zuverlässiger als .info)
-        hist = stock.history(period="2d")
-        if hist.empty:
+        price      = None
+        prev_close = None
+        volume     = None
+
+        # Methode 1: fast_info (schnell & zuverlässig)
+        try:
+            fi = stock.fast_info
+            price      = fi.last_price
+            prev_close = fi.previous_close
+            volume     = fi.three_month_average_volume
+            if price and price > 0:
+                logger.info(f"fast_info OK für {ticker}: {price}")
+        except Exception as e:
+            logger.warning(f"fast_info fehlgeschlagen für {ticker}: {e}")
+            price = None
+
+        # Methode 2: history (Fallback)
+        if not price:
+            try:
+                hist = stock.history(period="5d", timeout=15)
+                if not hist.empty:
+                    price      = float(hist["Close"].iloc[-1])
+                    prev_close = float(hist["Close"].iloc[-2]) if len(hist) >= 2 else price
+                    volume     = float(hist["Volume"].iloc[-1]) if "Volume" in hist.columns else None
+                    logger.info(f"history OK für {ticker}: {price}")
+            except Exception as e:
+                logger.warning(f"history fehlgeschlagen für {ticker}: {e}")
+
+        if not price:
             logger.warning(f"Keine Kursdaten für {ticker}")
             return None
 
-        price      = float(hist["Close"].iloc[-1])
-        prev_close = float(hist["Close"].iloc[-2]) if len(hist) >= 2 else price
+        if not prev_close:
+            prev_close = price
+
         change     = price - prev_close
         change_pct = (change / prev_close * 100) if prev_close else 0
-        volume     = float(hist["Volume"].iloc[-1]) if "Volume" in hist.columns else None
 
-        # .info nur für Metadaten, mit Fallback
+        # .info für Metadaten (optional, kein Pflichtfeld)
         try:
-            info     = stock.info or {}
+            info = stock.info or {}
         except Exception:
             info = {}
 
@@ -118,8 +148,8 @@ def get_stock_info(ticker: str) -> dict | None:
             "currency":   currency,
             "market_cap": info.get("marketCap"),
             "pe_ratio":   info.get("trailingPE"),
-            "52w_high":   info.get("fiftyTwoWeekHigh"),
-            "52w_low":    info.get("fiftyTwoWeekLow"),
+            "52w_high":   info.get("fiftyTwoWeekHigh") or getattr(stock.fast_info, "year_high", None),
+            "52w_low":    info.get("fiftyTwoWeekLow")  or getattr(stock.fast_info, "year_low", None),
             "volume":     volume,
             "sector":     info.get("sector", "–"),
         }
@@ -190,6 +220,41 @@ def format_large_number(n: float | None) -> str:
         return f"{n/1e6:.2f}M"
     return f"{n:,.0f}"
 
+def ai_summarize_news(news_items: list[dict], context: str = "") -> str:
+    """Lässt Claude die News analysieren und auf Deutsch zusammenfassen."""
+    if not anthropic_client.api_key:
+        return ""
+
+    try:
+        news_text = "\n\n".join([
+            f"Titel: {item['title']}\nQuelle: {item.get('source', '')}\nZusammenfassung: {item.get('summary', '')}"
+            for item in news_items if item.get("title")
+        ])
+
+        context_hint = f"für die Aktie {context}" if context else "zu den Finanzmärkten"
+
+        message = anthropic_client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=600,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"Du bist ein präziser Finanzanalyst. Analysiere folgende News-Schlagzeilen {context_hint} "
+                    f"und erstelle eine kurze, verständliche Zusammenfassung auf Deutsch.\n\n"
+                    f"Beachte:\n"
+                    f"- Fasse die wichtigsten Kernaussagen in 3-5 Sätzen zusammen\n"
+                    f"- Erkläre kurz die mögliche Bedeutung für Anleger\n"
+                    f"- Nutze einfache, verständliche Sprache\n"
+                    f"- Kein Markdown, keine Listen – nur Fließtext\n\n"
+                    f"News:\n{news_text}"
+                )
+            }]
+        )
+        return message.content[0].text
+    except Exception as e:
+        logger.warning(f"KI-Zusammenfassung fehlgeschlagen: {e}")
+        return ""
+
 # ─── Command Handler ──────────────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
@@ -221,6 +286,19 @@ async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Keine News verfügbar. Bitte später nochmals versuchen.")
         return
 
+    # KI-Zusammenfassung
+    if anthropic_client.api_key:
+        await update.message.reply_text("🤖 Claude analysiert die News...", parse_mode="Markdown")
+        summary = ai_summarize_news(news)
+        if summary:
+            await update.message.reply_text(
+                f"🧠 *KI-Analyse der aktuellen Marktlage*\n"
+                f"_{datetime.now().strftime('%d.%m.%Y %H:%M')}_\n\n"
+                f"{summary}",
+                parse_mode="Markdown"
+            )
+
+    # News-Liste mit Links
     text = f"📰 *Top Finanz-News*\n_{datetime.now().strftime('%d.%m.%Y %H:%M')}_\n\n"
     for i, item in enumerate(news, 1):
         title = item["title"][:100]
@@ -394,7 +472,23 @@ async def ticker_news_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     name  = info["name"] if info else ticker
     emoji = "📈" if (info and info["change"] >= 0) else "📉"
 
-    text = f"{emoji} *{name} ({ticker}) – News*\n_{datetime.now().strftime('%d.%m.%Y %H:%M')}_\n\n"
+    # KI-Zusammenfassung
+    if anthropic_client.api_key:
+        await update.message.reply_text("🤖 Claude analysiert die News...", parse_mode="Markdown")
+        summary = ai_summarize_news(news, context=f"{name} ({ticker})")
+        if summary:
+            price_str  = format_price(info["price"], info["currency"]) if info else ""
+            change_str = format_change(info["change"], info["change_pct"]) if info else ""
+            await update.message.reply_text(
+                f"{emoji} *{name} ({ticker}) – KI-Analyse*\n"
+                f"_{datetime.now().strftime('%d.%m.%Y %H:%M')}_"
+                + (f"\n💰 {price_str}  {change_str}" if info else "") +
+                f"\n\n🧠 {summary}",
+                parse_mode="Markdown"
+            )
+
+    # News-Liste mit Links
+    text = f"📰 *{name} ({ticker}) – Alle News*\n\n"
     for i, item in enumerate(news, 1):
         title = item["title"][:120]
         url   = item["url"]
@@ -523,7 +617,6 @@ async def daily_report(app: Application):
     if not CHAT_ID:
         return
 
-    from telegram import Bot
     chat_id   = CHAT_ID
     watchlist = get_watchlist(chat_id)
     if not watchlist:
@@ -544,10 +637,21 @@ async def daily_report(app: Application):
 
     await app.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
 
-    # Top News
-    news = get_general_news(limit=5)
+    # Top News holen
+    news = get_general_news(limit=6)
     if news:
-        news_text = "📰 *Top Finanz-News heute*\n\n"
+        # KI-Analyse
+        if anthropic_client.api_key:
+            summary = ai_summarize_news(news)
+            if summary:
+                await app.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"🧠 *Marktlage heute – KI-Analyse*\n\n{summary}",
+                    parse_mode="Markdown"
+                )
+
+        # News-Links
+        news_text = "📰 *Top News heute*\n\n"
         for i, item in enumerate(news, 1):
             title = item["title"][:100]
             url   = item["url"]

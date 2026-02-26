@@ -8,6 +8,8 @@ import logging
 import json
 import os
 import sqlite3
+from dotenv import load_dotenv
+load_dotenv()
 import asyncio
 import feedparser
 import yfinance as yf

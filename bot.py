@@ -87,26 +87,41 @@ def get_stock_info(ticker: str) -> dict | None:
     """Ruft aktuelle Kursdaten via yfinance ab."""
     try:
         stock = yf.Ticker(ticker)
-        info  = stock.info
-        if not info.get("regularMarketPrice") and not info.get("currentPrice"):
+
+        # Kursdaten über history (zuverlässiger als .info)
+        hist = stock.history(period="2d")
+        if hist.empty:
+            logger.warning(f"Keine Kursdaten für {ticker}")
             return None
-        price      = info.get("currentPrice") or info.get("regularMarketPrice", 0)
-        prev_close = info.get("previousClose", price)
+
+        price      = float(hist["Close"].iloc[-1])
+        prev_close = float(hist["Close"].iloc[-2]) if len(hist) >= 2 else price
         change     = price - prev_close
         change_pct = (change / prev_close * 100) if prev_close else 0
+        volume     = float(hist["Volume"].iloc[-1]) if "Volume" in hist.columns else None
+
+        # .info nur für Metadaten, mit Fallback
+        try:
+            info     = stock.info or {}
+        except Exception:
+            info = {}
+
+        name     = info.get("shortName") or info.get("longName") or ticker
+        currency = info.get("currency", "USD")
+
         return {
-            "name":         info.get("shortName", ticker),
-            "ticker":       ticker.upper(),
-            "price":        price,
-            "change":       change,
-            "change_pct":   change_pct,
-            "currency":     info.get("currency", "USD"),
-            "market_cap":   info.get("marketCap"),
-            "pe_ratio":     info.get("trailingPE"),
-            "52w_high":     info.get("fiftyTwoWeekHigh"),
-            "52w_low":      info.get("fiftyTwoWeekLow"),
-            "volume":       info.get("volume"),
-            "sector":       info.get("sector", "–"),
+            "name":       name,
+            "ticker":     ticker.upper(),
+            "price":      price,
+            "change":     change,
+            "change_pct": change_pct,
+            "currency":   currency,
+            "market_cap": info.get("marketCap"),
+            "pe_ratio":   info.get("trailingPE"),
+            "52w_high":   info.get("fiftyTwoWeekHigh"),
+            "52w_low":    info.get("fiftyTwoWeekLow"),
+            "volume":     volume,
+            "sector":     info.get("sector", "–"),
         }
     except Exception as e:
         logger.warning(f"Fehler bei {ticker}: {e}")

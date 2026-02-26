@@ -245,7 +245,7 @@ def ai_summarize_news(news_items: list[dict], context: str = "") -> str:
                     f"- Fasse die wichtigsten Kernaussagen in 3-5 Sätzen zusammen\n"
                     f"- Erkläre kurz die mögliche Bedeutung für Anleger\n"
                     f"- Nutze einfache, verständliche Sprache\n"
-                    f"- Kein Markdown, keine Listen – nur Fließtext\n\n"
+                    f"- möglichst übersichtlich, gerne mit emojis, wenn möglich Stichpunkte\n\n"
                     f"News:\n{news_text}"
                 )
             }]

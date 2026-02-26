@@ -336,7 +336,7 @@ async def quote_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📅 52W Hoch:  `{format_price(info['52w_high'] or 0, info['currency'])}`\n"
         f"📅 52W Tief:   `{format_price(info['52w_low'] or 0, info['currency'])}`\n"
         f"📦 Marktk.:    `{format_large_number(info['market_cap'])}`\n"
-        f"📉 KGV:        `{f\"{info['pe_ratio']:.1f}\" if info['pe_ratio'] else '–'}`\n"
+        f"📉 KGV:        `{'{:.1f}'.format(info['pe_ratio']) if info['pe_ratio'] else '–'}`\n"
         f"📊 Volumen:  `{format_large_number(info['volume'])}`\n"
         f"🏭 Sektor:     `{info['sector']}`\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
